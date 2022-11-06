@@ -122,30 +122,23 @@ def collator(batch):
 
 
 class Model(nn.Module):
-    def __init__(self, num_vocab, num_class, dropout=0.3):
+    def __init__(self, num_vocab, num_class, hidden_size=50):
         super().__init__()
-        self.embedding = nn.Embedding(num_vocab+1, 5000)
+        self.hidden_size = hidden_size
+        self.vocab_size = num_vocab
 
-        self.input = nn.Linear(5000, 500)
-        self.h1 = nn.Linear(500, 500)
-        self.h2 = nn.Linear(500, 200)
-        self.output = nn.Linear(200, num_class)
+        self.embedding = nn.Embedding(num_vocab+1, hidden_size)
+        self.rnn = nn.RNN(hidden_size, hidden_size)
+        self.output = nn.Linear(hidden_size, num_class)
 
-        # Regularization
-        self.dropout = nn.Dropout(p=dropout)
+    def forward(self, word_seq, h_init):
+        embedded = self.embedding(word_seq)
+        embedded = torch.transpose(embedded, 0, 1)
 
-    def forward(self, x):
-        # Create word embeddings of padded input of a batch, and average over k bigrams by ignoring the padding
-        embedded = self.embedding(x)
-        h0 = embedded.sum(dim=1)/(embedded!=0).sum(dim=1)
-        x = F.relu(self.dropout(self.input(h0)))
+        h_seq, h_final = self.rnn(embedded, h_init)
+        score_seq = self.output(h_seq)
 
-        x = F.relu(self.dropout(self.h1(x)))
-        x = F.relu(self.dropout(self.h2(x)))
-
-        output = self.output(x)
-        probs = F.softmax(output, dim=1)
-        return probs
+        return score_seq[-1], h_final
 
 
 def train(model, dataset, batch_size, learning_rate, num_epoch, device='cpu', model_path=None):
@@ -154,6 +147,8 @@ def train(model, dataset, batch_size, learning_rate, num_epoch, device='cpu', mo
     # assign these variables
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+    h_init = torch.zeros(1, batch_size, model.hidden_size)
+    h = h_init.to(device)
 
     start = datetime.datetime.now()
     print("Training started at: ", start)
@@ -164,22 +159,25 @@ def train(model, dataset, batch_size, learning_rate, num_epoch, device='cpu', mo
         for step, data in enumerate(data_loader):
             # get the inputs; data is a tuple of (inputs, labels)
             texts = data[0].to(device)
-            labels = data[1].to(device)
+            labels = data[1].to(device) 
 
             # zero the parameter gradients
             optimizer.zero_grad()
+
             # do forward propagation
-            probabilities = model(texts)
+            h=h.detach()
+            probabilities, h = model(texts[:, :-1], h)
+
             # do loss calculation
+            print(labels.size())
             loss = criterion(probabilities, labels)
+
             # do backward propagation
             loss.backward()
-            # do parameter optimization step
+            # normalize gradient
             optimizer.step()
 
-            # calculate running loss value for non padding
             running_loss += loss.item()
-            # print loss value every 100 steps and reset the running loss
             print('epoch: {}, step: {}, loss: {}'.format(epoch+1, step+1, running_loss/(step+1)))
 
     end = datetime.datetime.now()
@@ -209,9 +207,12 @@ def test(model, dataset, class_map, device='cpu'):
 
     labels = []
     with torch.no_grad():
+        h_init = torch.zeros(1, 20, model.hidden_size)
+        h = h_init.to(device)
+
         for data in data_loader:
             texts = data[0].to(device)
-            outputs = model(texts)
+            outputs, h = model(texts[:, :-1], h)
 
             # get the label predictions
             predictions = torch.argmax(outputs, dim=1).tolist()
@@ -232,8 +233,8 @@ def main(args):
 
     if args.train:
         movies = pd.read_csv(args.data_path, index_col=0)
-        summaries = list(movies['stemmed_summary'])[:500]
-        labels = list(movies['labelled_genre'])[:500]
+        summaries = list(movies['stemmed_summary'])[:1000]
+        labels = list(movies['labelled_genre'])[:1000]
 
         dataset = LangDataset(summaries, labels)
         num_vocab, num_class = dataset.vocab_size()
