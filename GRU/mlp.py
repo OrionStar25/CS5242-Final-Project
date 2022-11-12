@@ -148,8 +148,9 @@ class Model(nn.Module):
         return probs
 
 
-def train(model, dataset, batch_size, learning_rate, num_epoch, device='cpu', model_path=None):
-    data_loader = DataLoader(dataset, batch_size=batch_size, collate_fn=collator, shuffle=True)
+def train(model, train_set, validation_set, batch_size, learning_rate, num_epoch, device='cpu', model_path=None, train_validate_split=0.8):
+    train_loader = DataLoader(train_set, batch_size=batch_size, collate_fn=collator, shuffle=True)
+    validation_loader = DataLoader(validation_set, batch_size=batch_size, collate_fn=collator, shuffle=True)
 
     # assign these variables
     criterion = nn.CrossEntropyLoss()
@@ -159,9 +160,9 @@ def train(model, dataset, batch_size, learning_rate, num_epoch, device='cpu', mo
     print("Training started at: ", start)
 
     for epoch in range(num_epoch):
-        model.train()
+        model.train(True)
         running_loss = 0.0
-        for step, data in enumerate(data_loader):
+        for step, data in enumerate(train_loader):
             # get the inputs; data is a tuple of (inputs, labels)
             texts = data[0].to(device)
             labels = data[1].to(device)
@@ -180,7 +181,27 @@ def train(model, dataset, batch_size, learning_rate, num_epoch, device='cpu', mo
             # calculate running loss value for non padding
             running_loss += loss.item()
             # print loss value every 100 steps and reset the running loss
-            print('epoch: {}, step: {}, loss: {}'.format(epoch+1, step+1, running_loss/(step+1)))
+            if ((step+1) % 100) == 0:
+                print('epoch: {}, step: {}, loss: {}'.format(epoch+1, step+1, running_loss/(step+1)))
+        
+        # Turn off model training for validation
+        model.train(False)
+        running_vloss = 0.0
+        for step, vdata in enumerate(validation_loader):
+            
+            vinputs, vlabels = vdata
+            vinputs, vlabels = vinputs.to(device), vlabels.to(device)
+
+            # Use the current model to get outputs for the validation inputs
+            voutputs = model(vinputs)
+
+            # Get the validation loss
+            vloss = criterion(voutputs, vlabels)
+            running_vloss += vloss
+
+        # Calculate average loss over all steps
+        avg_vloss = running_vloss / (step + 1)
+        print(f'validation, epoch: {epoch+1}, loss: {avg_vloss}')
 
     end = datetime.datetime.now()
     print("Training ended at: ", end)
@@ -193,8 +214,8 @@ def train(model, dataset, batch_size, learning_rate, num_epoch, device='cpu', mo
         'optimizer_state_dict': optimizer.state_dict(),
         'loss': loss.item(),
         'vocabulary': {
-            'texts': dataset.text_vocab,
-            'labels': dataset.label_vocab
+            'texts': train_set.text_vocab,
+            'labels': train_set.label_vocab
         }
     }
     torch.save(checkpoint, model_path)
