@@ -9,8 +9,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
+from torch.nn.utils.rnn import pad_sequence
 
 torch.manual_seed(0)
+
+MAX_TOKEN_LENGTH = 1000
 
 
 class LangDataset(Dataset):
@@ -107,12 +110,17 @@ def collator(batch):
             data.append(items)
         else:
             # Training phase contains both texts and labels
-            data.append(items[0])
+            data.append(torch.tensor(items[0]))
             labels.append(items[1])
 
     # Pad all tensors to match length of the longest tensor 
-    padded_data = zip(*itertools.zip_longest(*data, fillvalue=0))
-    texts = torch.tensor(list(padded_data))
+    n = MAX_TOKEN_LENGTH - len(data[0])
+    if n > 0:
+        data[0] = torch.concat((data[0], torch.zeros(n)), 0)
+    padded = pad_sequence(data, batch_first=True)
+    if padded.shape[1] > MAX_TOKEN_LENGTH:
+        padded = padded[:, :MAX_TOKEN_LENGTH]
+    texts = torch.tensor(padded).long()
 
     if len(labels) != 0:
         labels = torch.LongTensor(labels)
@@ -125,13 +133,14 @@ def collator(batch):
 class Model(nn.Module):
     def __init__(self, num_vocab, num_class, dropout=0.3):
         super().__init__()
-        print(num_vocab)
-        self.embedding = nn.Embedding(num_vocab+1, 5000)
+        self.embedding = nn.Embedding(num_vocab+1, 500)
 
-        self.input = nn.Linear(5000, 1000)
+        self.input = nn.Linear(500000, 1000)
         self.h1 = nn.Linear(1000, 500)
         self.h2 = nn.Linear(500, 200)
         self.output = nn.Linear(200, num_class)
+
+        self.flatten = nn.Flatten(-2, -1)
 
         # Regularization
         self.dropout = nn.Dropout(p=dropout)
@@ -139,7 +148,9 @@ class Model(nn.Module):
     def forward(self, x):
         # Create word embeddings of padded input of a batch, and average over k bigrams by ignoring the padding
         embedded = self.embedding(x)
-        h0 = embedded.sum(dim=1)/(embedded!=0).sum(dim=1)
+        print(embedded.size())
+    
+        h0 = self.flatten(embedded)
         x = F.relu(self.dropout(self.input(h0)))
 
         x = F.relu(self.dropout(self.h1(x)))
@@ -177,6 +188,7 @@ def train(model, dataset, batch_size, learning_rate, num_epoch, device='cpu', mo
             optimizer.zero_grad()
             # do forward propagation
             probabilities = model(texts)
+
             # do loss calculation
             loss = criterion(probabilities, labels)
             # do backward propagation
