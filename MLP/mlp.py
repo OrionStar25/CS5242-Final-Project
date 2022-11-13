@@ -1,6 +1,7 @@
 import argparse
 import datetime
 import itertools
+import math
 
 import pandas as pd
 import torch
@@ -124,10 +125,11 @@ def collator(batch):
 class Model(nn.Module):
     def __init__(self, num_vocab, num_class, dropout=0.3):
         super().__init__()
+        print(num_vocab)
         self.embedding = nn.Embedding(num_vocab+1, 5000)
 
-        self.input = nn.Linear(5000, 500)
-        self.h1 = nn.Linear(500, 500)
+        self.input = nn.Linear(5000, 1000)
+        self.h1 = nn.Linear(1000, 500)
         self.h2 = nn.Linear(500, 200)
         self.output = nn.Linear(200, num_class)
 
@@ -148,9 +150,13 @@ class Model(nn.Module):
         return probs
 
 
-def train(model, train_set, validation_set, batch_size, learning_rate, num_epoch, device='cpu', model_path=None, train_validate_split=0.8):
-    train_loader = DataLoader(train_set, batch_size=batch_size, collate_fn=collator, shuffle=True)
-    validation_loader = DataLoader(validation_set, batch_size=batch_size, collate_fn=collator, shuffle=True)
+def train(model, dataset, batch_size, learning_rate, num_epoch, device='cpu', model_path=None, train_validate_split=0.8):
+    train_size = math.floor(train_validate_split * len(dataset))
+    test_size = len(dataset) - train_size
+    train_dataset, test_dataset = torch.utils.data.random_split(dataset, [train_size, test_size])
+
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, collate_fn=collator, shuffle=True)
+    validation_loader = DataLoader(test_dataset, batch_size=batch_size, collate_fn=collator, shuffle=False)
 
     # assign these variables
     criterion = nn.CrossEntropyLoss()
@@ -180,15 +186,14 @@ def train(model, train_set, validation_set, batch_size, learning_rate, num_epoch
 
             # calculate running loss value for non padding
             running_loss += loss.item()
-            # print loss value every 100 steps and reset the running loss
-            if ((step+1) % 100) == 0:
-                print('epoch: {}, step: {}, loss: {}'.format(epoch+1, step+1, running_loss/(step+1)))
+            # if ((step+1) % 100) == 0:
+            #     print('epoch: {}, step: {}, loss: {}'.format(epoch+1, step+1, running_loss/(step+1)))
+            print('epoch: {}, step: {}, loss: {}'.format(epoch+1, step+1, running_loss/(step+1)))
         
         # Turn off model training for validation
         model.train(False)
         running_vloss = 0.0
         for step, vdata in enumerate(validation_loader):
-            
             vinputs, vlabels = vdata
             vinputs, vlabels = vinputs.to(device), vlabels.to(device)
 
@@ -214,8 +219,8 @@ def train(model, train_set, validation_set, batch_size, learning_rate, num_epoch
         'optimizer_state_dict': optimizer.state_dict(),
         'loss': loss.item(),
         'vocabulary': {
-            'texts': train_set.text_vocab,
-            'labels': train_set.label_vocab
+            'texts': dataset.text_vocab,
+            'labels': dataset.label_vocab
         }
     }
     torch.save(checkpoint, model_path)
@@ -226,7 +231,7 @@ def train(model, train_set, validation_set, batch_size, learning_rate, num_epoch
 
 def test(model, dataset, class_map, device='cpu'):
     model.eval()
-    data_loader = DataLoader(dataset, batch_size=20, collate_fn=collator, shuffle=False)
+    data_loader = DataLoader(dataset, batch_size=50, collate_fn=collator, shuffle=False)
 
     labels = []
     with torch.no_grad():
@@ -253,15 +258,15 @@ def main(args):
 
     if args.train:
         movies = pd.read_csv(args.data_path, index_col=0)
-        summaries = list(movies['stemmed_summary'])[:500]
-        labels = list(movies['labelled_genre'])[:500]
+        summaries = list(movies['summary'])
+        labels = list(movies['labelled_genre'])
 
         dataset = LangDataset(summaries, labels)
         num_vocab, num_class = dataset.vocab_size()
         model = Model(num_vocab, num_class).to(device)
         
-        learning_rate = 1e-3
-        batch_size = 20
+        learning_rate = 1e-5
+        batch_size = 50
         num_epochs = 3
 
         train(model, dataset, batch_size, learning_rate, num_epochs, device, args.model_path)
@@ -271,8 +276,8 @@ def main(args):
         
         # create the test dataset object using LangDataset class
         movies = pd.read_csv(args.data_path, index_col=0)
-        summaries = list(movies['stemmed_summary'])[:500]
-        labels = list(movies['labelled_genre'])[:500]
+        summaries = list(movies['summary'])
+        labels = list(movies['labelled_genre'])
 
         checkpoint = torch.load(args.model_path)
         dataset = LangDataset(summaries, vocab=checkpoint['vocabulary'])

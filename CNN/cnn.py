@@ -1,6 +1,7 @@
 import argparse
 import datetime
 import itertools
+import math
 
 import pandas as pd
 import torch
@@ -124,13 +125,13 @@ def collator(batch):
 class Model(nn.Module):
     def __init__(self, num_vocab, num_class, dropout=0.3):
         super().__init__()
-        self.embedding_len = 50
+        self.embedding_len = 500
         self.embedding = nn.Embedding(num_vocab+1, self.embedding_len)
 
-        self.conv1 = nn.Conv1d(self.embedding_len, 32, kernel_size=5, padding='same')
-        self.conv2 = nn.Conv1d(32, 16, kernel_size=5, padding='same')
+        self.conv1 = nn.Conv1d(self.embedding_len, 50, kernel_size=5, padding='same')
+        self.conv2 = nn.Conv1d(50, 20, kernel_size=5, padding='same')
 
-        self.output = nn.Linear(16, num_class)
+        self.output = nn.Linear(20, num_class)
 
         # Regularization
         self.pool = nn.MaxPool1d(2, 2)
@@ -150,9 +151,13 @@ class Model(nn.Module):
         return probs
 
 
-def train(model, train_set, validation_set, batch_size, learning_rate, num_epoch, device='cpu', model_path=None, train_validate_split=0.8):
-    train_loader = DataLoader(train_set, batch_size=batch_size, collate_fn=collator, shuffle=True)
-    validation_loader = DataLoader(validation_set, batch_size=batch_size, collate_fn=collator, shuffle=True)
+def train(model, train_set, batch_size, learning_rate, num_epoch, device='cpu', model_path=None, train_validate_split=0.8):
+    train_size = math.floor(train_validate_split * len(train_set))
+    test_size = len(train_set) - train_size
+    train_dataset, test_dataset = torch.utils.data.random_split(train_set, [train_size, test_size])
+
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, collate_fn=collator, shuffle=True)
+    validation_loader = DataLoader(test_dataset, batch_size=batch_size, collate_fn=collator, shuffle=False)
 
     # assign these variables
     criterion = nn.CrossEntropyLoss()
@@ -182,9 +187,7 @@ def train(model, train_set, validation_set, batch_size, learning_rate, num_epoch
 
             # calculate running loss value for non padding
             running_loss += loss.item()
-            # print loss value every 100 steps and reset the running loss
-            if ((step+1) % 100) == 0:
-                print('epoch: {}, step: {}, loss: {}'.format(epoch+1, step+1, running_loss/(step+1)))
+            print('epoch: {}, step: {}, loss: {}'.format(epoch+1, step+1, running_loss/(step+1)))
         
         # Turn off model training for validation
         model.train(False)
@@ -255,29 +258,26 @@ def main(args):
 
     if args.train:
         movies = pd.read_csv(args.data_path, index_col=0)
-        train_validate_split = 0.8
-        split_index = int(train_validate_split * len(summaries))
-        train_summaries, validation_summaries = list(movies['stemmed_summary'])[:split_index], list(movies['stemmed_summary'])[split_index:1000]
-        train_labels, validation_labels = list(movies['labelled_genre'])[:split_index], list(movies['labelled_genre'])[split_index:1000] 
+        summaries = list(movies['summary'])
+        labels = list(movies['labelled_genre'])
 
-        train_set = LangDataset(train_summaries, train_labels)
-        validation_set = LangDataset(validation_summaries, validation_labels)
+        dataset = LangDataset(summaries, labels)
         num_vocab, num_class = dataset.vocab_size()
         model = Model(num_vocab, num_class).to(device)
         
-        learning_rate = 1e-3
-        batch_size = 20
+        learning_rate = 1e-4
+        batch_size = 50
         num_epochs = 3
 
-        train(model, train_set, validation_set, batch_size, learning_rate, num_epochs, device, args.model_path)
+        train(model, dataset, batch_size, learning_rate, num_epochs, device, args.model_path)
 
     if args.test:
         assert args.model_path is not None, "Please provide the model to test using --model_path argument"
         
         # create the test dataset object using LangDataset class
         movies = pd.read_csv(args.data_path, index_col=0)
-        summaries = list(movies['stemmed_summary'])[:500]
-        labels = list(movies['labelled_genre'])[:500]
+        summaries = list(movies['summary'])
+        labels = list(movies['labelled_genre'])
 
         checkpoint = torch.load(args.model_path)
         dataset = LangDataset(summaries, vocab=checkpoint['vocabulary'])
