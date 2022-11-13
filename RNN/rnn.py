@@ -9,8 +9,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
+from torch.nn.utils.rnn import pad_sequence
 
 torch.manual_seed(0)
+
+MAX_TOKEN_LENGTH = 100
 
 
 class LangDataset(Dataset):
@@ -104,15 +107,20 @@ def collator(batch):
     for items in batch:
         # Testing phase only contains texts
         if type(items) == list:
-            data.append(items)
+            data.append(torch.tensor(items))
         else:
             # Training phase contains both texts and labels
-            data.append(items[0])
+            data.append(torch.tensor(items[0]))
             labels.append(items[1])
 
     # Pad all tensors to match length of the longest tensor 
-    padded_data = zip(*itertools.zip_longest(*data, fillvalue=0))
-    texts = torch.tensor(list(padded_data))
+    n = MAX_TOKEN_LENGTH - len(data[0])
+    if n > 0:
+        data[0] = torch.concat((data[0], torch.zeros(n)), 0)
+    padded = pad_sequence(data, batch_first=True)
+    if padded.shape[1] > MAX_TOKEN_LENGTH:
+        padded = padded[:, :MAX_TOKEN_LENGTH]
+    texts = torch.tensor(padded).long()
 
     if len(labels) != 0:
         labels = torch.LongTensor(labels)
@@ -122,8 +130,9 @@ def collator(batch):
     return texts, labels
 
 
+
 class Model(nn.Module):
-    def __init__(self, num_vocab, num_class, hidden_size=500):
+    def __init__(self, num_vocab, num_class, hidden_size=32):
         super().__init__()
         self.hidden_size = hidden_size
         self.vocab_size = num_vocab
@@ -135,9 +144,11 @@ class Model(nn.Module):
     def forward(self, word_seq, h_init):
         embedded = self.embedding(word_seq)
         embedded = torch.transpose(embedded, 0, 1)
+        # print(embedded.size())
 
         h_seq, h_final = self.rnn(embedded, h_init)
         score_seq = self.output(h_seq)
+        # print(score_seq.size())
 
         return score_seq[-1], h_final
 
@@ -167,12 +178,21 @@ def train(model, train_set, batch_size, learning_rate, num_epoch, device='cpu', 
             texts = data[0].to(device)
             labels = data[1].to(device) 
 
+            # print(texts[0])
+            # print(texts[1])
+
+
+            if len(texts)!=batch_size:
+                continue
+
             # zero the parameter gradients
             optimizer.zero_grad()
 
             # do forward propagation
             h=h.detach()
-            probabilities, h = model(texts[:, :-1], h)
+            probabilities, h = model(texts, h)
+            # print(probabilities.size())
+            
 
             # do loss calculation
             loss = criterion(probabilities, labels)
@@ -183,7 +203,8 @@ def train(model, train_set, batch_size, learning_rate, num_epoch, device='cpu', 
             optimizer.step()
 
             running_loss += loss.item()
-            print('epoch: {}, step: {}, loss: {}'.format(epoch+1, step+1, running_loss/(step+1)))
+            if (step+1)%50 == 0:
+                print('epoch: {}, step: {}, loss: {}'.format(epoch+1, step+1, running_loss/(step+1)))
 
         # Turn off model training for validation
         model.train(False)
@@ -194,9 +215,12 @@ def train(model, train_set, batch_size, learning_rate, num_epoch, device='cpu', 
             vinputs, vlabels = vdata
             vinputs, vlabels = vinputs.to(device), vlabels.to(device)
 
+            if len(vinputs)!=batch_size:
+                continue
+
             # Use the current model to get outputs for the validation inputs
             h_val = h_val.detach()
-            voutputs, h_val = model(vinputs[:, :-1], h_val)
+            voutputs, h_val = model(vinputs, h_val)
 
             # Get the validation loss
             vloss = criterion(voutputs, vlabels)
@@ -238,7 +262,10 @@ def test(model, dataset, class_map, device='cpu'):
 
         for data in data_loader:
             texts = data[0].to(device)
-            outputs, h = model(texts[:, :-1], h)
+            if len(texts)!=20:
+                continue
+            outputs, h = model(texts, h)
+            print(outputs)
 
             # get the label predictions
             predictions = torch.argmax(outputs, dim=1).tolist()
@@ -266,9 +293,9 @@ def main(args):
         num_vocab, num_class = dataset.vocab_size()
         model = Model(num_vocab, num_class).to(device)
         
-        learning_rate = 1e-4
-        batch_size = 20
-        num_epochs = 3
+        learning_rate = 1e-3
+        batch_size = 200
+        num_epochs = 100000
 
         train(model, dataset, batch_size, learning_rate, num_epochs, device, args.model_path)
 
@@ -291,6 +318,7 @@ def main(args):
         # the lang map should contain the mapping between class id to the language id (e.g. eng, fra, etc.)
         label_vocab = checkpoint['vocabulary']['labels']
         label_map = {v: k for k, v in label_vocab.items()}
+        # print(label_map)
 
         # run the prediction
         preds = test(model, dataset, label_map, device)
@@ -299,6 +327,7 @@ def main(args):
         with open(args.output_path, 'w', encoding='utf-8') as out:
             out.write('\n'.join(preds))
 
+        labels = labels[:-(len(labels)-len(preds))]
         assert len(preds) == len(labels), \
             "Length of predictions ({}) and labels ({}) are not the same".format(len(preds), len(labels))
         correct = 0

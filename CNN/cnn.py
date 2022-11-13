@@ -9,8 +9,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
+from torch.nn.utils.rnn import pad_sequence
 
 torch.manual_seed(0)
+
+MAX_TOKEN_LENGTH = 1000
 
 
 class LangDataset(Dataset):
@@ -104,15 +107,20 @@ def collator(batch):
     for items in batch:
         # Testing phase only contains texts
         if type(items) == list:
-            data.append(items)
+            data.append(torch.tensor(items))
         else:
             # Training phase contains both texts and labels
-            data.append(items[0])
+            data.append(torch.tensor(items[0]))
             labels.append(items[1])
 
     # Pad all tensors to match length of the longest tensor 
-    padded_data = zip(*itertools.zip_longest(*data, fillvalue=0))
-    texts = torch.tensor(list(padded_data))
+    n = MAX_TOKEN_LENGTH - len(data[0])
+    if n > 0:
+        data[0] = torch.concat((data[0], torch.zeros(n)), 0)
+    padded = pad_sequence(data, batch_first=True)
+    if padded.shape[1] > MAX_TOKEN_LENGTH:
+        padded = padded[:, :MAX_TOKEN_LENGTH]
+    texts = torch.tensor(padded).long()
 
     if len(labels) != 0:
         labels = torch.LongTensor(labels)
@@ -122,16 +130,19 @@ def collator(batch):
     return texts, labels
 
 
+
 class Model(nn.Module):
     def __init__(self, num_vocab, num_class, dropout=0.3):
         super().__init__()
         self.embedding_len = 500
         self.embedding = nn.Embedding(num_vocab+1, self.embedding_len)
 
-        self.conv1 = nn.Conv1d(self.embedding_len, 50, kernel_size=5, padding='same')
-        self.conv2 = nn.Conv1d(50, 20, kernel_size=5, padding='same')
+        self.flatten = nn.Flatten(-2, -1)
 
-        self.output = nn.Linear(20, num_class)
+        self.conv1 = nn.Conv1d(1, 10, kernel_size=1000, stride=500)
+        self.conv2 = nn.Conv1d(10, 5, kernel_size=50, stride=5)
+
+        self.output = nn.Linear(225, num_class)
 
         # Regularization
         self.pool = nn.MaxPool1d(2, 2)
@@ -139,16 +150,19 @@ class Model(nn.Module):
 
     def forward(self, x):
         embedded = self.embedding(x)
-        x = torch.transpose(embedded, 1, 2)
+        x = self.flatten(embedded)
+        x = torch.unsqueeze(x, 1)
 
         x = self.pool(F.relu(self.dropout(self.conv1(x))))
         x = self.pool(F.relu(self.dropout(self.conv2(x))))
-        x, _ = x.max(dim=-1)
+        x = self.flatten(x)
+        # print(x.size())
+        # x, _ = x.max(dim=-1)
         
         output = self.output(x)
-        probs = F.softmax(output, dim=1)
+        # probs = F.softmax(output, dim=1)
 
-        return probs
+        return output
 
 
 def train(model, train_set, batch_size, learning_rate, num_epoch, device='cpu', model_path=None, train_validate_split=0.8):
@@ -187,7 +201,9 @@ def train(model, train_set, batch_size, learning_rate, num_epoch, device='cpu', 
 
             # calculate running loss value for non padding
             running_loss += loss.item()
-            print('epoch: {}, step: {}, loss: {}'.format(epoch+1, step+1, running_loss/(step+1)))
+            if (step+1)%100 == 0:
+                print(probabilities)
+                print('epoch: {}, step: {}, loss: {}'.format(epoch+1, step+1, running_loss/(step+1)))
         
         # Turn off model training for validation
         model.train(False)
@@ -266,9 +282,8 @@ def main(args):
         model = Model(num_vocab, num_class).to(device)
         
         learning_rate = 1e-4
-        batch_size = 50
-        num_epochs = 3
-
+        batch_size = 100
+        num_epochs = 20
         train(model, dataset, batch_size, learning_rate, num_epochs, device, args.model_path)
 
     if args.test:

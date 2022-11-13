@@ -13,7 +13,7 @@ from torch.nn.utils.rnn import pad_sequence
 
 torch.manual_seed(0)
 
-MAX_TOKEN_LENGTH = 1000
+MAX_TOKEN_LENGTH = 500
 
 
 class LangDataset(Dataset):
@@ -107,7 +107,7 @@ def collator(batch):
     for items in batch:
         # Testing phase only contains texts
         if type(items) == list:
-            data.append(items)
+            data.append(torch.tensor(items))
         else:
             # Training phase contains both texts and labels
             data.append(torch.tensor(items[0]))
@@ -133,9 +133,9 @@ def collator(batch):
 class Model(nn.Module):
     def __init__(self, num_vocab, num_class, dropout=0.3):
         super().__init__()
-        self.embedding = nn.Embedding(num_vocab+1, 500)
+        self.embedding = nn.Embedding(num_vocab+1, 32)
 
-        self.input = nn.Linear(500000, 1000)
+        self.input = nn.Linear(32*MAX_TOKEN_LENGTH, 1000)
         self.h1 = nn.Linear(1000, 500)
         self.h2 = nn.Linear(500, 200)
         self.output = nn.Linear(200, num_class)
@@ -157,8 +157,8 @@ class Model(nn.Module):
         x = F.relu(self.dropout(self.h2(x)))
 
         output = self.output(x)
-        probs = F.softmax(output, dim=1)
-        return probs
+        # probs = F.softmax(output, dim=1)
+        return output
 
 
 def train(model, dataset, batch_size, learning_rate, num_epoch, device='cpu', model_path=None, train_validate_split=0.8):
@@ -248,7 +248,7 @@ def test(model, dataset, class_map, device='cpu'):
     labels = []
     with torch.no_grad():
         for data in data_loader:
-            texts = data[0].to(device)
+            texts = data.to(device)
             outputs = model(texts)
 
             # get the label predictions
