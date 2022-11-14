@@ -2,19 +2,22 @@ import argparse
 import datetime
 import itertools
 import math
-
 import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+import nltk
+
 from torch.utils.data import Dataset, DataLoader
 from torch.nn.utils.rnn import pad_sequence
+from nltk.tokenize import word_tokenize
 
+# nltk.download('punkt')
 torch.manual_seed(0)
-
-MAX_TOKEN_LENGTH = 1000
-
+MAX_TOKEN_LENGTH = 50
+MOST_COMMON = 1000
+EMBEDDING_SIZE = 100
 
 class LangDataset(Dataset):
     def __init__(self, texts, labels=None, vocab=None):
@@ -33,13 +36,18 @@ class LangDataset(Dataset):
 
     def create_text_vocab(self, data):
         # Vocabulary starts with 1, 0 is for padding
-        text_vocab = {}
-        for sentence in data:
-            for word in sentence.split():
-                if word not in text_vocab:
-                    text_vocab[word] = len(text_vocab)+1
+        data = [word_tokenize(x) for x in data]
 
-        text_vocab['unk'] = len(text_vocab)+1
+        text_vocab = {}
+        fdist = nltk.FreqDist() 
+        for sentence in data:
+            for word in sentence:
+                fdist[word] += 1
+        
+        common_words = fdist.most_common(MOST_COMMON)
+        for idx, word in enumerate(common_words):
+            text_vocab[word[0]] = (idx+1)
+
         return text_vocab
 
 
@@ -84,8 +92,6 @@ class LangDataset(Dataset):
         for word in words:
             if word in self.text_vocab.keys():
                 text.append(self.text_vocab[word])
-            else:
-                text.append(self.text_vocab['unk'])
 
         if self.labels is None:
             return text
@@ -130,39 +136,83 @@ def collator(batch):
     return texts, labels
 
 
-
 class Model(nn.Module):
     def __init__(self, num_vocab, num_class, dropout=0.3):
         super().__init__()
-        self.embedding_len = 500
-        self.embedding = nn.Embedding(num_vocab+1, self.embedding_len)
 
-        self.flatten = nn.Flatten(-2, -1)
-
-        self.conv1 = nn.Conv1d(1, 10, kernel_size=1000, stride=500)
-        self.conv2 = nn.Conv1d(10, 5, kernel_size=50, stride=5)
-
-        self.output = nn.Linear(225, num_class)
-
-        # Regularization
-        self.pool = nn.MaxPool1d(2, 2)
-        self.dropout = nn.Dropout(p=dropout)
+        # Parameters regarding text preprocessing
+        self.seq_len = MAX_TOKEN_LENGTH
+        self.num_words = num_vocab
+        self.embedding_size = EMBEDDING_SIZE
+        
+        # Dropout definition
+        self.dropout = nn.Dropout(0.25)
+        
+        # CNN parameters definition
+        # Kernel sizes
+        self.kernel_1 = 2
+        self.kernel_2 = 3
+        self.kernel_3 = 4
+        self.kernel_4 = 5
+        
+        # Output size for each convolution
+        self.out_size = num_class
+        # Number of strides for each convolution
+        self.stride = 2
+        
+        # Embedding layer definition
+        self.embedding = nn.Embedding(self.num_words+1, self.embedding_size, padding_idx=0)
+        
+        # Convolution layers definition
+        self.conv_1 = nn.Conv1d(self.seq_len, self.out_size, self.kernel_1, self.stride)
+        self.conv_2 = nn.Conv1d(self.seq_len, self.out_size, self.kernel_2, self.stride)
+        self.conv_3 = nn.Conv1d(self.seq_len, self.out_size, self.kernel_3, self.stride)
+        self.conv_4 = nn.Conv1d(self.seq_len, self.out_size, self.kernel_4, self.stride)
+        
+        # Max pooling layers definition
+        self.pool_1 = nn.MaxPool1d(self.kernel_1, self.stride)
+        self.pool_2 = nn.MaxPool1d(self.kernel_2, self.stride)
+        self.pool_3 = nn.MaxPool1d(self.kernel_3, self.stride)
+        self.pool_4 = nn.MaxPool1d(self.kernel_4, self.stride)
+        
+        # Fully connected layer definition
+        self.fc = nn.Linear(658, self.out_size)
 
     def forward(self, x):
-        embedded = self.embedding(x)
-        x = self.flatten(embedded)
-        x = torch.unsqueeze(x, 1)
-
-        x = self.pool(F.relu(self.dropout(self.conv1(x))))
-        x = self.pool(F.relu(self.dropout(self.conv2(x))))
-        x = self.flatten(x)
-        # print(x.size())
-        # x, _ = x.max(dim=-1)
+        x = self.embedding(x)
+      
+        # Convolution layer 1 is applied
+        x1 = self.conv_1(x)
+        x1 = torch.relu(x1)
+        x1 = self.pool_1(x1)
         
-        output = self.output(x)
-        # probs = F.softmax(output, dim=1)
+        # Convolution layer 2 is applied
+        x2 = self.conv_2(x)
+        x2 = torch.relu((x2))
+        x2 = self.pool_2(x2)
+    
+        # Convolution layer 3 is applied
+        x3 = self.conv_3(x)
+        x3 = torch.relu(x3)
+        x3 = self.pool_3(x3)
+        
+        # Convolution layer 4 is applied
+        x4 = self.conv_4(x)
+        x4 = torch.relu(x4)
+        x4 = self.pool_4(x4)
+        
+        # The output of each convolutional layer is concatenated into a unique vector
+        union = torch.cat((x1, x2, x3, x4), 2)
+        union = union.reshape(union.size(0), -1)
 
-        return output
+        # The "flattened" vector is passed through a fully connected layer
+        out = self.fc(union)
+        # Dropout is applied		
+        out = self.dropout(out)
+        # Activation function is applied
+        out = torch.sigmoid(out)
+        
+        return out.squeeze()
 
 
 def train(model, train_set, batch_size, learning_rate, num_epoch, device='cpu', model_path=None, train_validate_split=0.8):
@@ -202,7 +252,7 @@ def train(model, train_set, batch_size, learning_rate, num_epoch, device='cpu', 
             # calculate running loss value for non padding
             running_loss += loss.item()
             if (step+1)%100 == 0:
-                print(probabilities)
+             #   print(probabilities)
                 print('epoch: {}, step: {}, loss: {}'.format(epoch+1, step+1, running_loss/(step+1)))
         
         # Turn off model training for validation
@@ -281,9 +331,10 @@ def main(args):
         num_vocab, num_class = dataset.vocab_size()
         model = Model(num_vocab, num_class).to(device)
         
-        learning_rate = 1e-4
+        learning_rate = 5e-4
         batch_size = 100
-        num_epochs = 20
+        num_epochs = 50
+
         train(model, dataset, batch_size, learning_rate, num_epochs, device, args.model_path)
 
     if args.test:
@@ -334,3 +385,6 @@ def get_arguments():
 if __name__ == "__main__":
     args = get_arguments()
     main(args)
+
+
+# Accuracy: 18.60

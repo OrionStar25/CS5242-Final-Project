@@ -2,18 +2,21 @@ import argparse
 import datetime
 import itertools
 import math
-
+import nltk
 import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+
 from torch.utils.data import Dataset, DataLoader
 from torch.nn.utils.rnn import pad_sequence
+from nltk.tokenize import word_tokenize
 
 torch.manual_seed(0)
-
-MAX_TOKEN_LENGTH = 500
+MAX_TOKEN_LENGTH = 50
+MOST_COMMON = 1000
+EMBEDDING_SIZE = 100
 
 
 class LangDataset(Dataset):
@@ -33,13 +36,18 @@ class LangDataset(Dataset):
 
     def create_text_vocab(self, data):
         # Vocabulary starts with 1, 0 is for padding
-        text_vocab = {}
-        for sentence in data:
-            for word in sentence.split():
-                if word not in text_vocab:
-                    text_vocab[word] = len(text_vocab)+1
+        data = [word_tokenize(x) for x in data]
 
-        text_vocab['unk'] = len(text_vocab)+1
+        text_vocab = {}
+        fdist = nltk.FreqDist() 
+        for sentence in data:
+            for word in sentence:
+                fdist[word] += 1
+        
+        common_words = fdist.most_common(MOST_COMMON)
+        for idx, word in enumerate(common_words):
+            text_vocab[word[0]] = (idx+1)
+
         return text_vocab
 
 
@@ -84,8 +92,6 @@ class LangDataset(Dataset):
         for word in words:
             if word in self.text_vocab.keys():
                 text.append(self.text_vocab[word])
-            else:
-                text.append(self.text_vocab['unk'])
 
         if self.labels is None:
             return text
@@ -131,14 +137,14 @@ def collator(batch):
 
 
 class Model(nn.Module):
-    def __init__(self, num_vocab, num_class, dropout=0.3):
+    def __init__(self, num_vocab, num_class, dropout=0.2):
         super().__init__()
-        self.embedding = nn.Embedding(num_vocab+1, 32)
+        self.embedding = nn.Embedding(num_vocab+1, EMBEDDING_SIZE, padding_idx=0)
 
-        self.input = nn.Linear(32*MAX_TOKEN_LENGTH, 1000)
-        self.h1 = nn.Linear(1000, 500)
-        self.h2 = nn.Linear(500, 200)
-        self.output = nn.Linear(200, num_class)
+        self.input = nn.Linear(EMBEDDING_SIZE*MAX_TOKEN_LENGTH, 50)
+        self.h1 = nn.Linear(50, 50)
+        self.h2 = nn.Linear(50, 20)
+        self.output = nn.Linear(20, num_class)
 
         self.flatten = nn.Flatten(-2, -1)
 
@@ -146,18 +152,14 @@ class Model(nn.Module):
         self.dropout = nn.Dropout(p=dropout)
 
     def forward(self, x):
-        # Create word embeddings of padded input of a batch, and average over k bigrams by ignoring the padding
         embedded = self.embedding(x)
-        print(embedded.size())
-    
         h0 = self.flatten(embedded)
-        x = F.relu(self.dropout(self.input(h0)))
-
-        x = F.relu(self.dropout(self.h1(x)))
+        
+        x = F.relu(self.input(h0))
+        x = F.relu(self.h1(x))
         x = F.relu(self.dropout(self.h2(x)))
 
         output = self.output(x)
-        # probs = F.softmax(output, dim=1)
         return output
 
 
@@ -166,7 +168,7 @@ def train(model, dataset, batch_size, learning_rate, num_epoch, device='cpu', mo
     test_size = len(dataset) - train_size
     train_dataset, test_dataset = torch.utils.data.random_split(dataset, [train_size, test_size])
 
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, collate_fn=collator, shuffle=True)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, collate_fn=collator, shuffle=False)
     validation_loader = DataLoader(test_dataset, batch_size=batch_size, collate_fn=collator, shuffle=False)
 
     # assign these variables
@@ -198,9 +200,9 @@ def train(model, dataset, batch_size, learning_rate, num_epoch, device='cpu', mo
 
             # calculate running loss value for non padding
             running_loss += loss.item()
-            # if ((step+1) % 100) == 0:
-            #     print('epoch: {}, step: {}, loss: {}'.format(epoch+1, step+1, running_loss/(step+1)))
-            print('epoch: {}, step: {}, loss: {}'.format(epoch+1, step+1, running_loss/(step+1)))
+            if ((step+1) % 100) == 0:
+                 print('epoch: {}, step: {}, loss: {}'.format(epoch+1, step+1, running_loss/(step+1)))
+            #print('epoch: {}, step: {}, loss: {}'.format(epoch+1, step+1, running_loss/(step+1)))
         
         # Turn off model training for validation
         model.train(False)
@@ -248,7 +250,7 @@ def test(model, dataset, class_map, device='cpu'):
     labels = []
     with torch.no_grad():
         for data in data_loader:
-            texts = data.to(device)
+            texts = data[0].to(device)
             outputs = model(texts)
 
             # get the label predictions
@@ -277,9 +279,9 @@ def main(args):
         num_vocab, num_class = dataset.vocab_size()
         model = Model(num_vocab, num_class).to(device)
         
-        learning_rate = 1e-5
-        batch_size = 50
-        num_epochs = 3
+        learning_rate = 5e-4
+        batch_size = 100
+        num_epochs = 30
 
         train(model, dataset, batch_size, learning_rate, num_epochs, device, args.model_path)
 
@@ -331,3 +333,5 @@ def get_arguments():
 if __name__ == "__main__":
     args = get_arguments()
     main(args)
+
+# Accuracy: 17.10

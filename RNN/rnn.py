@@ -2,18 +2,21 @@ import argparse
 import datetime
 import itertools
 import math
-
+import nltk
 import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+
 from torch.utils.data import Dataset, DataLoader
 from torch.nn.utils.rnn import pad_sequence
+from nltk.tokenize import word_tokenize
 
 torch.manual_seed(0)
-
-MAX_TOKEN_LENGTH = 100
+MAX_TOKEN_LENGTH = 50
+MOST_COMMON = 10000
+EMBEDDING_SIZE = 100
 
 
 class LangDataset(Dataset):
@@ -33,13 +36,18 @@ class LangDataset(Dataset):
 
     def create_text_vocab(self, data):
         # Vocabulary starts with 1, 0 is for padding
-        text_vocab = {}
-        for sentence in data:
-            for word in sentence.split():
-                if word not in text_vocab:
-                    text_vocab[word] = len(text_vocab)+1
+        data = [word_tokenize(x) for x in data]
 
-        text_vocab['unk'] = len(text_vocab)+1
+        text_vocab = {}
+        fdist = nltk.FreqDist() 
+        for sentence in data:
+            for word in sentence:
+                fdist[word] += 1
+        
+        common_words = fdist.most_common(MOST_COMMON)
+        for idx, word in enumerate(common_words):
+            text_vocab[word[0]] = (idx+1)
+
         return text_vocab
 
 
@@ -84,8 +92,6 @@ class LangDataset(Dataset):
         for word in words:
             if word in self.text_vocab.keys():
                 text.append(self.text_vocab[word])
-            else:
-                text.append(self.text_vocab['unk'])
 
         if self.labels is None:
             return text
@@ -130,25 +136,22 @@ def collator(batch):
     return texts, labels
 
 
-
 class Model(nn.Module):
     def __init__(self, num_vocab, num_class, hidden_size=32):
         super().__init__()
-        self.hidden_size = hidden_size
+        self.hidden_size = EMBEDDING_SIZE
         self.vocab_size = num_vocab
 
-        self.embedding = nn.Embedding(num_vocab+1, hidden_size)
-        self.rnn = nn.RNN(hidden_size, hidden_size)
-        self.output = nn.Linear(hidden_size, num_class)
+        self.embedding = nn.Embedding(num_vocab+1, self.hidden_size, padding_idx=0)
+        self.lstm = nn.RNN(self.hidden_size, self.hidden_size)
+        self.output = nn.Linear(self.hidden_size, num_class)
 
     def forward(self, word_seq, h_init):
         embedded = self.embedding(word_seq)
         embedded = torch.transpose(embedded, 0, 1)
-        # print(embedded.size())
 
-        h_seq, h_final = self.rnn(embedded, h_init)
+        h_seq, h_final = self.lstm(embedded, h_init)
         score_seq = self.output(h_seq)
-        # print(score_seq.size())
 
         return score_seq[-1], h_final
 
@@ -178,10 +181,6 @@ def train(model, train_set, batch_size, learning_rate, num_epoch, device='cpu', 
             texts = data[0].to(device)
             labels = data[1].to(device) 
 
-            # print(texts[0])
-            # print(texts[1])
-
-
             if len(texts)!=batch_size:
                 continue
 
@@ -203,7 +202,7 @@ def train(model, train_set, batch_size, learning_rate, num_epoch, device='cpu', 
             optimizer.step()
 
             running_loss += loss.item()
-            if (step+1)%50 == 0:
+            if (step+1)%100 == 0:
                 print('epoch: {}, step: {}, loss: {}'.format(epoch+1, step+1, running_loss/(step+1)))
 
         # Turn off model training for validation
@@ -265,7 +264,6 @@ def test(model, dataset, class_map, device='cpu'):
             if len(texts)!=20:
                 continue
             outputs, h = model(texts, h)
-            print(outputs)
 
             # get the label predictions
             predictions = torch.argmax(outputs, dim=1).tolist()
@@ -294,8 +292,8 @@ def main(args):
         model = Model(num_vocab, num_class).to(device)
         
         learning_rate = 1e-3
-        batch_size = 200
-        num_epochs = 100000
+        batch_size = 100
+        num_epochs = 100
 
         train(model, dataset, batch_size, learning_rate, num_epochs, device, args.model_path)
 
@@ -349,3 +347,5 @@ def get_arguments():
 if __name__ == "__main__":
     args = get_arguments()
     main(args)
+
+# Accuracy: 39.94
