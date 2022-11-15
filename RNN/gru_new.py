@@ -22,9 +22,9 @@ class RNN_Model(nn.Module):
 
         self.embedding = nn.Embedding(max_features, self.embedding_dim)
 
-        self.dropout = nn.Dropout(0.2)
+        self.dropout = nn.Dropout(0.35)
 
-        self.rnn = nn.LSTM(self.embedding_dim, self.hidden_size, num_layers=self.num_layers, bidirectional=True, dropout=0.5)
+        self.rnn = nn.LSTM(self.embedding_dim, self.hidden_size, num_layers=self.num_layers, bidirectional=True, dropout=0.6)
 
         self.output = nn.Linear(self.hidden_size*2, num_classes)
 
@@ -33,7 +33,7 @@ class RNN_Model(nn.Module):
         embedded = torch.transpose(embedded, 0, 1)
 
         h_seq, h_final = self.rnn(embedded, h_init)
-        score_seq = torch.relu(self.dropout(self.output(h_seq)))
+        score_seq = torch.tanh(self.dropout(self.output(h_seq)))
 
         return score_seq[-1], h_final
 
@@ -53,8 +53,10 @@ def train(model, train_X, train_Y, test_X, test_Y, tokenizer, encoder, batch_siz
     # criterion = nn.CrossEntropyLoss()
     criterion = nn.CrossEntropyLoss(reduction='sum')
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+    scheduler = optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.9)
     h = torch.zeros(model.num_layers*2, batch_size, model.hidden_size).to(device)
     c = torch.zeros(model.num_layers*2, batch_size, model.hidden_size).to(device)
+    final_acc = []
 
     start = datetime.datetime.now()
     print("Training started at: ", start)
@@ -62,6 +64,9 @@ def train(model, train_X, train_Y, test_X, test_Y, tokenizer, encoder, batch_siz
     for epoch in range(num_epochs):
         model.train(True)
         running_loss = 0.0
+        true_count = 0
+        total_count = 0
+        accuracies = []
         for step, data in enumerate(train_loader):
             # get the inputs; data is a tuple of (inputs, labels)
             texts = data[0].to(device)
@@ -82,18 +87,28 @@ def train(model, train_X, train_Y, test_X, test_Y, tokenizer, encoder, batch_siz
             # do backward propagation
             loss.backward()
             # do parameter optimization step
+            normalize_gradient(model)
             optimizer.step()
+
+            # Calculate the count of accurate predictions
+            true_count += torch.sum(torch.argmax(probabilities, dim=1) == labels)
+            total_count += labels.shape[0]
 
             # calculate running loss value for non padding
             running_loss += loss.item()
+            accuracy = (true_count/total_count)*100
+            accuracies.append(accuracy)
             if (step+1)%50 == 0:
-                print('epoch: {}, step: {}, loss: {}'.format(epoch+1, step+1, running_loss/(step+1)))
+                print('epoch: {}, step: {}, loss: {}, accuracy: {}'.format(epoch+1, step+1, running_loss/(step+1),accuracy))
+        scheduler.step()
+        final_acc.append((sum(accuracies)*1.0/len(accuracies)))
         
         # Turn off model training for validation
         model.eval()
         running_vloss = 0.0
         true_count = 0
         total_count = 0
+        val_accuracies = []
         h_val = torch.zeros(model.num_layers*2, batch_size, model.hidden_size).to(device)
         c_val = torch.zeros(model.num_layers*2, batch_size, model.hidden_size).to(device)
         for step, vdata in enumerate(validation_loader):
@@ -117,16 +132,12 @@ def train(model, train_X, train_Y, test_X, test_Y, tokenizer, encoder, batch_siz
             # Calculate the count of accurate predictions
             true_count += torch.sum(torch.argmax(voutputs, dim=1) == vlabels)
             total_count += vlabels.shape[0]
-            # if step == 0:
-            #     print(torch.argmax(voutputs, dim=1))
-            #     print(vlabels)
-            #     print(torch.argmax(voutputs, dim=1) == vlabels)
-            #     print(true_count, total_count)
-                # print(voutputs)
 
         # Calculate average loss over all steps
         avg_vloss = running_vloss / (step + 1)
-        print(f'validation, epoch: {epoch+1}, loss: {avg_vloss}, accuracy: {(true_count/total_count)*100}')
+        accuracy = (true_count/total_count)*100
+        val_accuracies.append(accuracy)
+        print(f'validation, epoch: {epoch+1}, loss: {avg_vloss}, accuracy: {accuracy}')
 
     end = datetime.datetime.now()
     print("Training ended at: ", end)
@@ -147,6 +158,22 @@ def train(model, train_X, train_Y, test_X, test_Y, tokenizer, encoder, batch_siz
 
     print('Model saved in ', model_path)
     print('Training finished in {} minutes.'.format((end - start).seconds / 60.0))
+
+def normalize_gradient(model):
+
+    norm_sq=0
+
+    for param in model.parameters():
+        norm_sq += param.grad.data.norm() ** 2
+    grad_norm=torch.sqrt(norm_sq)
+
+    if grad_norm<1e-4:
+        model.zero_grad()
+    else:    
+        for param in model.parameters():
+            param.grad.data.div_(grad_norm)
+
+    return grad_norm
 
 
 def process_texts(train_X, test_X, max_features, max_len):
@@ -184,22 +211,24 @@ def main(args):
     device = torch.device(device_str)
 
     movies = pd.read_csv(args.data_path, index_col=0)
-    data = movies[['stemmed_summary', 'labelled_genre']]
-    train_X, test_X, train_Y, test_Y = train_test_split(data['stemmed_summary'], data['labelled_genre'], 
-                                                        stratify=data['labelled_genre'], test_size = 0.1)
+    data = movies[['summary', 'labelled_genre']]
+    train_X, test_X, train_Y, test_Y = train_test_split(data['summary'], data['labelled_genre'], 
+                                                        stratify=data['labelled_genre'], test_size = 0.3)
 
     
     learning_rate = 1e-3
-    batch_size = 200
-    num_epochs = 50
-    max_features = 7000
-    max_len = 100
-    embedding_dim = 32
+    batch_size = 600
+    num_epochs = 20
+    max_features = 12000
+    max_len = 50
+    embedding_dim = 1024
 
     train_X, test_X, tokenizer = process_texts(train_X, test_X, max_features, max_len)
     train_Y, test_Y, encoder = process_labels(train_Y, test_Y)
     num_classes = len(encoder.classes_)
-    model = RNN_Model(num_classes, max_features, embedding_dim, 32, device_str).to(device)
+    model = RNN_Model(num_classes, max_features, embedding_dim, 96, device_str).to(device)
+    model.embedding.weight.data.uniform_(-0.1, 0.1)
+    model.output.weight.data.uniform_(-0.1, 0.1)
 
     train(model, train_X, train_Y, test_X, test_Y, tokenizer, encoder, batch_size, learning_rate, num_epochs, device, args.model_path)
 

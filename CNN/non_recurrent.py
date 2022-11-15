@@ -79,6 +79,7 @@ def train(model, train_X, train_Y, test_X, test_Y, tokenizer, encoder, batch_siz
     # criterion = nn.CrossEntropyLoss()
     criterion = nn.CrossEntropyLoss(reduction='sum')
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+    final_acc = []
 
     start = datetime.datetime.now()
     print("Training started at: ", start)
@@ -86,6 +87,7 @@ def train(model, train_X, train_Y, test_X, test_Y, tokenizer, encoder, batch_siz
     for epoch in range(num_epochs):
         model.train(True)
         running_loss = 0.0
+        true_count, total_count, accuracies = 0, 0, []
         for step, data in enumerate(train_loader):
             # get the inputs; data is a tuple of (inputs, labels)
             texts = data[0].to(device)
@@ -102,16 +104,24 @@ def train(model, train_X, train_Y, test_X, test_Y, tokenizer, encoder, batch_siz
             # do parameter optimization step
             optimizer.step()
 
+             # Calculate the count of accurate predictions
+            true_count += torch.sum(torch.argmax(probabilities, dim=1) == labels)
+            total_count += labels.shape[0]
+
             # calculate running loss value for non padding
             running_loss += loss.item()
+            accuracy = (true_count/total_count)*100
+            accuracies.append(accuracy)
             if (step+1)%100 == 0:
-                print('epoch: {}, step: {}, loss: {}'.format(epoch+1, step+1, running_loss/(step+1)))
+                print('epoch: {}, step: {}, loss: {},accuracy: {}'.format(epoch+1, step+1, running_loss/(step+1), accuracy))
+        final_acc.append(sum(accuracies)*1.0/len(accuracies))
         
         # Turn off model training for validation
         model.eval()
         running_vloss = 0.0
         true_count = 0
         total_count = 0
+        val_accuracies = []
         for step, vdata in enumerate(validation_loader):
             
             vinputs, vlabels = vdata
@@ -130,6 +140,8 @@ def train(model, train_X, train_Y, test_X, test_Y, tokenizer, encoder, batch_siz
 
         # Calculate average loss over all steps
         avg_vloss = running_vloss / (step + 1)
+        accuracy = (true_count/total_count)*100
+        val_accuracies.append(accuracy)
         print(f'validation, epoch: {epoch+1}, loss: {avg_vloss}, accuracy: {(true_count/total_count)*100}')
 
     end = datetime.datetime.now()
@@ -184,13 +196,13 @@ def main(args):
     device = torch.device(device_str)
 
     movies = pd.read_csv(args.data_path, index_col=0)
-    data = movies[['stemmed_summary', 'labelled_genre']]
-    train_X, test_X, train_Y, test_Y = train_test_split(data['stemmed_summary'], data['labelled_genre'], 
-                                                        stratify=data['labelled_genre'], test_size = 0.2)
+    data = movies[['summary', 'labelled_genre']]
+    train_X, test_X, train_Y, test_Y = train_test_split(data['summary'], data['labelled_genre'], 
+                                                        stratify=data['labelled_genre'], test_size = 0.3)
     
     learning_rate = 1e-3
-    batch_size = 100
-    num_epochs = 50
+    batch_size = 200
+    num_epochs = 20
     max_features = 7000
     max_len = 100
     embedding_dim = 32
