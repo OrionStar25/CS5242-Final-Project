@@ -1,6 +1,5 @@
 import argparse
 import datetime
-import itertools
 import math
 import nltk
 import pandas as pd

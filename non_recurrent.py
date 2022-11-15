@@ -1,6 +1,5 @@
 import argparse
 import datetime
-import math
 import pandas as pd
 import torch
 import torch.nn as nn
